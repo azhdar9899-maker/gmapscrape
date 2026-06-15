@@ -1,14 +1,19 @@
-name: Scrape Google Maps (Tehran) → Release
+name: Scrape Google Maps (Tehran using scraper grid-bbox) → Release
+
+on:
+  workflow_dispatch:
 
 jobs:
   scrape-and-release:
     runs-on: ubuntu-latest
     env:
-      QUERY: "Tehran, Iran"
-      RADIUS_METERS: "10000"
-      OUTPUT_FILE: "tehran-places-$(date +%Y%m%d-%H%M%S).json"
+      # Tehran bounding box (minLat,minLng,maxLat,maxLng)
+      BBOX: "35.50,51.20,35.90,51.70"
+      GRID_ROWS: "4"
+      GRID_COLS: "4"
+      OUT_NAME: "tehran-places-$(date +%Y%m%d-%H%M%S).json"
     steps:
-      - name: Checkout this repo (workflow)
+      - name: Checkout workflow repo
         uses: actions/checkout@v4
 
       - name: Checkout google-maps-scraper
@@ -28,26 +33,36 @@ jobs:
           go mod download
           go build -o gmscraper ./cmd || go build -o gmscraper .
 
-      - name: Run scraper (Tehran)
+      - name: Run scraper using built-in grid-bbox
         working-directory: google-maps-scraper
+        env:
+          BBOX: ${{ env.BBOX }}
+          ROWS: ${{ env.GRID_ROWS }}
+          COLS: ${{ env.GRID_COLS }}
+          OUT: ${{ env.OUT_NAME }}
         run: |
-          # Example CLI. Adjust flags to match the scraper's real CLI.
-          ./gmscraper --query "${QUERY}" --radius "${RADIUS_METERS}" --output "../${OUTPUT_FILE}" --format json || \
-          (echo "Make sure the CLI flags match the scraper. Failing job." && exit 1)
+          set -euo pipefail
+          echo "Running scraper with grid-bbox=${BBOX}, rows=${ROWS}, cols=${COLS}"
+          ./gmscraper --grid-bbox "${BBOX}" --grid-rows "${ROWS}" --grid-cols "${COLS}" --format json --output "../${OUT}" || (echo "Scraper failed" && exit 1)
 
-      - name: Create GitHub Release
+      - name: Create GitHub release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: actions/create-release@v1
         with:
-          tag_name: "tehran-scrape-$(date +%Y%m%d-%H%M%S)"
-          name: "Tehran scrape $(date +%Y-%m-%d %H:%M:%S UTC)"
-          body: "Automated scrape of Google Maps places for Tehran."
+          tag_name: tehran-scrape-${{ github.run_id }}-${{ github.run_number }}
+          release_name: "Tehran scrape ${{ github.run_id }} #${{ github.run_number }}"
+          body: Automated scrape of Google Maps places for Tehran using scraper's grid-bbox.
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload results to release
-        uses: softprops/action-gh-release@v1
+      - name: Upload scrape asset to release
+        uses: actions/upload-release-asset@v1
         with:
-          files: "./${{ env.OUTPUT_FILE }}"
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./${{ env.OUT_NAME }}
+          asset_name: ${{ env.OUT_NAME }}
+          asset_content_type: application/json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
