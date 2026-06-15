@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Running scraper with grid-bbox=${BBOX}, rows=${ROWS}, cols=${COLS}"
-          ./gmscraper --grid-bbox "${BBOX}" --depth 10 --grid-cell 1.0 --email --extra-reviews --zoom 19 --output "../${OUT}" || (echo "Scraper failed" && exit 1)
+          ./gmscraper --grid-bbox "${BBOX}" --depth 10 --grid-cell 1.0 --email --extra-reviews --zoom 19 --results "../${OUT}" || (echo "Scraper failed" && exit 1)
 
       - name: Create GitHub release
         id: create_release
