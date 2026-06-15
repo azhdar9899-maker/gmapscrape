@@ -1,0 +1,56 @@
+name: Scrape Google Maps (Tehran) → Release
+
+jobs:
+  scrape-and-release:
+    runs-on: ubuntu-latest
+    env:
+      QUERY: "Tehran, Iran"
+      RADIUS_METERS: "10000"
+      OUTPUT_FILE: "tehran-places-$(date +%Y%m%d-%H%M%S).json"
+    steps:
+      - name: Checkout this repo (workflow)
+        uses: actions/checkout@v4
+
+      - name: Checkout google-maps-scraper
+        uses: actions/checkout@v4
+        with:
+          repository: gosom/google-maps-scraper
+          path: google-maps-scraper
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.21"
+
+      - name: Build scraper
+        working-directory: google-maps-scraper
+        run: |
+          go mod download
+          go build -o gmscraper ./cmd || go build -o gmscraper .
+
+      - name: Run scraper (Tehran)
+        working-directory: google-maps-scraper
+        env:
+          # If the tool requires an API key or other secrets, add them as repository secrets
+          # e.g. GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          # Example CLI. Adjust flags to match the scraper's real CLI.
+          ./gmscraper --query "${QUERY}" --radius "${RADIUS_METERS}" --output "../${OUTPUT_FILE}" --format json || \
+          (echo "Make sure the CLI flags match the scraper. Failing job." && exit 1)
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "tehran-scrape-$(date +%Y%m%d-%H%M%S)"
+          name: "Tehran scrape $(date +%Y-%m-%d %H:%M:%S UTC)"
+          body: "Automated scrape of Google Maps places for Tehran."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload results to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "./${{ env.OUTPUT_FILE }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
