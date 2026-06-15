@@ -9,8 +9,6 @@ jobs:
     env:
       # Tehran bounding box (minLat,minLng,maxLat,maxLng)
       BBOX: "35.50,51.20,35.90,51.70"
-      GRID_ROWS: "4"
-      GRID_COLS: "4"
       OUT_NAME: "tehran-places-$(date +%Y%m%d-%H%M%S).json"
     steps:
       - name: Checkout workflow repo
@@ -43,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Running scraper with grid-bbox=${BBOX}, rows=${ROWS}, cols=${COLS}"
-          ./gmscraper --grid-bbox "${BBOX}" --grid-rows "${ROWS}" --grid-cols "${COLS}" --format json --output "../${OUT}" || (echo "Scraper failed" && exit 1)
+          ./gmscraper --grid-bbox "${BBOX}" --depth 10 --grid-cell 1.0 --email --extra-reviews --zoom 19 --format json --output "../${OUT}" || (echo "Scraper failed" && exit 1)
 
       - name: Create GitHub release
         id: create_release
