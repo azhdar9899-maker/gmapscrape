@@ -30,9 +30,6 @@ jobs:
 
       - name: Run scraper (Tehran)
         working-directory: google-maps-scraper
-        env:
-          # If the tool requires an API key or other secrets, add them as repository secrets
-          # e.g. GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: |
           # Example CLI. Adjust flags to match the scraper's real CLI.
           ./gmscraper --query "${QUERY}" --radius "${RADIUS_METERS}" --output "../${OUTPUT_FILE}" --format json || \
