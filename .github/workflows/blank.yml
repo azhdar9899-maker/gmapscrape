@@ -1,19 +1,74 @@
-name: Scrape Google Maps (Tehran using scraper grid-bbox) → Release
+name: Scrape Google Maps (Tehran, batched grid) → Release
 
 on:
   workflow_dispatch:
+    inputs:
+      bbox:
+        description: "Bounding box: minLat,minLng,maxLat,maxLng"
+        default: "35.50,51.20,35.90,51.70"
+      tile_deg:
+        description: "Tile size in degrees (smaller = more, shorter jobs)"
+        default: "0.10"
+      depth:
+        description: "Max scroll depth per cell"
+        default: "10"
+      grid_cell:
+        description: "Grid cell size in km"
+        default: "1.0"
+      zoom:
+        description: "Zoom level (0-21)"
+        default: "19"
+
+permissions:
+  contents: write
 
 jobs:
-  scrape-and-release:
+  # 1) Split the bbox into small tiles -> a matrix of sub-jobs.
+  plan:
     runs-on: ubuntu-latest
-    env:
-      # Tehran bounding box (minLat,minLng,maxLat,maxLng)
-      BBOX: "35.50,51.20,35.90,51.70"
-      OUT_NAME: "tehran-places-$(date +%Y%m%d-%H%M%S).csv"
+    outputs:
+      tiles: ${{ steps.tiles.outputs.tiles }}
     steps:
-      - name: Checkout workflow repo
-        uses: actions/checkout@v4
+      - name: Compute tiles
+        id: tiles
+        env:
+          BBOX: ${{ github.event.inputs.bbox }}
+          TILE_DEG: ${{ github.event.inputs.tile_deg }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          min_lat, min_lng, max_lat, max_lng = map(float, os.environ["BBOX"].split(","))
+          tile = float(os.environ["TILE_DEG"])
+          eps = 1e-9
+          tiles, r, lat = [], 0, min_lat
+          while lat < max_lat - eps:
+              lat2 = min(lat + tile, max_lat)
+              c, lng = 0, min_lng
+              while lng < max_lng - eps:
+                  lng2 = min(lng + tile, max_lng)
+                  tiles.append({
+                      "id": f"r{r}c{c}",
+                      "bbox": f"{lat:.4f},{lng:.4f},{lat2:.4f},{lng2:.4f}",
+                  })
+                  lng, c = lng2, c + 1
+              lat, r = lat2, r + 1
+          if len(tiles) > 256:
+              raise SystemExit(f"{len(tiles)} tiles exceeds GitHub's 256-job matrix limit; increase tile_deg")
+          print("tiles=" + json.dumps(tiles))
+          print(f"Generated {len(tiles)} tiles", file=__import__("sys").stderr)
+          PY
 
+  # 2) One short job per tile, all running in parallel.
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        tile: ${{ fromJson(needs.plan.outputs.tiles) }}
+    steps:
       - name: Checkout google-maps-scraper
         uses: actions/checkout@v4
         with:
@@ -21,9 +76,10 @@ jobs:
           path: google-maps-scraper
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: "1.21"
+          cache-dependency-path: google-maps-scraper/go.sum
 
       - name: Build scraper
         working-directory: google-maps-scraper
@@ -31,36 +87,84 @@ jobs:
           go mod download
           go build -o gmscraper ./cmd || go build -o gmscraper .
 
-      - name: Run scraper using built-in grid-bbox
+      - name: Run scraper for tile ${{ matrix.tile.id }}
         working-directory: google-maps-scraper
         env:
-          BBOX: ${{ env.BBOX }}
-          ROWS: ${{ env.GRID_ROWS }}
-          COLS: ${{ env.GRID_COLS }}
-          OUT: ${{ env.OUT_NAME }}
+          TILE_BBOX: ${{ matrix.tile.bbox }}
+          DEPTH: ${{ github.event.inputs.depth }}
+          GRID_CELL: ${{ github.event.inputs.grid_cell }}
+          ZOOM: ${{ github.event.inputs.zoom }}
+          OUT: tehran-${{ matrix.tile.id }}.csv
         run: |
           set -euo pipefail
-          echo "Running scraper with grid-bbox=${BBOX}, rows=${ROWS}, cols=${COLS}"
-          ./gmscraper --grid-bbox "${BBOX}" --depth 10 --grid-cell 1.0 --email --extra-reviews --zoom 19 --results "../${OUT}" || (echo "Scraper failed" && exit 1)
+          echo "Scraping tile ${{ matrix.tile.id }} bbox=${TILE_BBOX}"
+          ./gmscraper \
+            --grid-bbox "${TILE_BBOX}" \
+            --grid-cell "${GRID_CELL}" \
+            --depth "${DEPTH}" \
+            --zoom "${ZOOM}" \
+            --email \
+            --extra-reviews \
+            --exit-on-inactivity 5m \
+            --results "../${OUT}"
+          # Guarantee the artifact exists even if the tile had zero results.
+          touch "../${OUT}"
+
+      - name: Upload tile result
+        uses: actions/upload-artifact@v4
+        with:
+          name: tile-${{ matrix.tile.id }}
+          path: tehran-${{ matrix.tile.id }}.csv
+          retention-days: 7
+          if-no-files-found: warn
+
+  # 3) Merge every tile CSV into one file and publish a single release.
+  release:
+    needs: scrape
+    if: ${{ always() && needs.scrape.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all tile results
+        uses: actions/download-artifact@v4
+        with:
+          path: tiles
+          pattern: tile-*
+          merge-multiple: true
+
+      - name: Merge CSVs
+        id: merge
+        run: |
+          set -euo pipefail
+          stamp="$(date +%Y%m%d-%H%M%S)"
+          out="tehran-places-${stamp}.csv"
+          shopt -s nullglob
+          files=(tiles/*.csv)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No tile CSVs were produced." >&2
+            exit 1
+          fi
+          # Keep the header from the first non-empty file, append data rows from the rest.
+          header_written=0
+          for f in "${files[@]}"; do
+            [ -s "$f" ] || continue
+            if [ "$header_written" -eq 0 ]; then
+              cat "$f" > "$out"
+              header_written=1
+            else
+              tail -n +2 "$f" >> "$out"
+            fi
+          done
+          [ -s "$out" ] || { echo "All tiles empty." >&2; exit 1; }
+          rows=$(( $(wc -l < "$out") - 1 ))
+          echo "Merged ${#files[@]} files, ${rows} data rows -> ${out}"
+          echo "out_name=${out}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
-        id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: tehran-scrape-${{ github.run_id }}-${{ github.run_number }}
-          release_name: "Tehran scrape ${{ github.run_id }} #${{ github.run_number }}"
-          body: Automated scrape of Google Maps places for Tehran using scraper's grid-bbox.
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload scrape asset to release
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./${{ env.OUT_NAME }}
-          asset_name: ${{ env.OUT_NAME }}
-          asset_content_type: application/json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: "Tehran scrape ${{ github.run_id }} #${{ github.run_number }}"
+          body: |
+            Automated batched scrape of Google Maps places for Tehran.
+            bbox=${{ github.event.inputs.bbox }} tile_deg=${{ github.event.inputs.tile_deg }}
+          files: ${{ steps.merge.outputs.out_name }}
