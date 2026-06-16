@@ -18,6 +18,9 @@ on:
       zoom:
         description: "Zoom level (0-21)"
         default: "19"
+      max_minutes:
+        description: "Per-tile time budget; scraper is gracefully stopped after this so partial data is still uploaded"
+        default: "300"
 
 permissions:
   contents: write
@@ -62,7 +65,9 @@ jobs:
   scrape:
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    # Job backstop kept above the per-step budget; the scraper is stopped
+    # gracefully well before this via coreutils `timeout` in the run step.
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -89,28 +94,51 @@ jobs:
 
       - name: Run scraper for tile ${{ matrix.tile.id }}
         working-directory: google-maps-scraper
+        # Step-level timeout: if a step times out only THIS step fails, so the
+        # `if: always()` upload below still runs (a job timeout would cancel
+        # everything). Kept just above the in-step coreutils budget.
+        timeout-minutes: 330
         env:
           TILE_BBOX: ${{ matrix.tile.bbox }}
           DEPTH: ${{ github.event.inputs.depth }}
           GRID_CELL: ${{ github.event.inputs.grid_cell }}
           ZOOM: ${{ github.event.inputs.zoom }}
+          MAX_MINUTES: ${{ github.event.inputs.max_minutes }}
           OUT: tehran-${{ matrix.tile.id }}.csv
         run: |
-          set -euo pipefail
-          echo "Scraping tile ${{ matrix.tile.id }} bbox=${TILE_BBOX}"
-          ./gmscraper \
-            --grid-bbox "${TILE_BBOX}" \
-            --grid-cell "${GRID_CELL}" \
-            --depth "${DEPTH}" \
-            --zoom "${ZOOM}" \
-            --email \
-            --extra-reviews \
-            --exit-on-inactivity 5m \
-            --results "../${OUT}"
+          set -uo pipefail
+          echo "Scraping tile ${{ matrix.tile.id }} bbox=${TILE_BBOX} (budget ${MAX_MINUTES}m)"
+          # The scraper flushes each result to the CSV as it is scraped, and
+          # flushes/closes cleanly on SIGTERM. `timeout` sends SIGTERM at the
+          # budget (then SIGKILL 90s later if it ignores), so partial data is
+          # preserved and written even when the tile can't finish in time.
+          status=0
+          timeout --signal=SIGTERM --kill-after=90s "${MAX_MINUTES}m" \
+            ./gmscraper \
+              --grid-bbox "${TILE_BBOX}" \
+              --grid-cell "${GRID_CELL}" \
+              --depth "${DEPTH}" \
+              --zoom "${ZOOM}" \
+              --email \
+              --extra-reviews \
+              --exit-on-inactivity 5m \
+              --results "../${OUT}" || status=$?
+          # 124 = hit the time budget (expected); 143 = terminated by SIGTERM.
+          # Treat those as success so the partial CSV still uploads.
+          if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
+            echo "Tile ${{ matrix.tile.id }} stopped at time budget; keeping partial results."
+          elif [ "$status" -ne 0 ]; then
+            echo "Scraper exited with status $status" >&2
+            exit "$status"
+          fi
           # Guarantee the artifact exists even if the tile had zero results.
           touch "../${OUT}"
+          echo "Rows in ${OUT}: $(( $(wc -l < "../${OUT}") ))"
 
       - name: Upload tile result
+        # Always upload — even if the scrape step failed or was force-stopped,
+        # whatever was flushed to disk is captured.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tile-${{ matrix.tile.id }}
