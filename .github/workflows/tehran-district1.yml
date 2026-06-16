@@ -1,14 +1,18 @@
-name: Scrape Google Maps (Tehran, batched grid) → Release
+name: Scrape Google Maps (Tehran District 1) → Release
+
+# Scrapes Google Maps places for Tehran's District 1 (منطقه ۱) — the northern
+# area covering Tajrish, Niavaran, Velenjak, Darband, Zafaraniyeh, Qeytariyeh.
+# Uses gosom/google-maps-scraper grid mode, partitioned into parallel tiles.
 
 on:
   workflow_dispatch:
     inputs:
       bbox:
-        description: "Bounding box: minLat,minLng,maxLat,maxLng"
-        default: "35.50,51.20,35.90,51.70"
+        description: "Bounding box for District 1: minLat,minLng,maxLat,maxLng"
+        default: "35.78,51.37,35.84,51.56"
       tile_deg:
         description: "Tile size in degrees (smaller = more, shorter jobs)"
-        default: "0.10"
+        default: "0.05"
       depth:
         description: "Max scroll depth per cell"
         default: "10"
@@ -18,9 +22,6 @@ on:
       zoom:
         description: "Zoom level (0-21)"
         default: "19"
-      max_minutes:
-        description: "Per-tile time budget; scraper is gracefully stopped after this so partial data is still uploaded"
-        default: "300"
 
 permissions:
   contents: write
@@ -65,9 +66,7 @@ jobs:
   scrape:
     needs: plan
     runs-on: ubuntu-latest
-    # Job backstop kept above the per-step budget; the scraper is stopped
-    # gracefully well before this via coreutils `timeout` in the run step.
-    timeout-minutes: 350
+    timeout-minutes: 330
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -94,55 +93,32 @@ jobs:
 
       - name: Run scraper for tile ${{ matrix.tile.id }}
         working-directory: google-maps-scraper
-        # Step-level timeout: if a step times out only THIS step fails, so the
-        # `if: always()` upload below still runs (a job timeout would cancel
-        # everything). Kept just above the in-step coreutils budget.
-        timeout-minutes: 330
         env:
           TILE_BBOX: ${{ matrix.tile.bbox }}
           DEPTH: ${{ github.event.inputs.depth }}
           GRID_CELL: ${{ github.event.inputs.grid_cell }}
           ZOOM: ${{ github.event.inputs.zoom }}
-          MAX_MINUTES: ${{ github.event.inputs.max_minutes }}
-          OUT: tehran-${{ matrix.tile.id }}.csv
+          OUT: tehran-d1-${{ matrix.tile.id }}.csv
         run: |
-          set -uo pipefail
-          echo "Scraping tile ${{ matrix.tile.id }} bbox=${TILE_BBOX} (budget ${MAX_MINUTES}m)"
-          # The scraper flushes each result to the CSV as it is scraped, and
-          # flushes/closes cleanly on SIGTERM. `timeout` sends SIGTERM at the
-          # budget (then SIGKILL 90s later if it ignores), so partial data is
-          # preserved and written even when the tile can't finish in time.
-          status=0
-          timeout --signal=SIGTERM --kill-after=90s "${MAX_MINUTES}m" \
-            ./gmscraper \
-              --grid-bbox "${TILE_BBOX}" \
-              --grid-cell "${GRID_CELL}" \
-              --depth "${DEPTH}" \
-              --zoom "${ZOOM}" \
-              --email \
-              --extra-reviews \
-              --exit-on-inactivity 5m \
-              --results "../${OUT}" || status=$?
-          # 124 = hit the time budget (expected); 143 = terminated by SIGTERM.
-          # Treat those as success so the partial CSV still uploads.
-          if [ "$status" -eq 124 ] || [ "$status" -eq 143 ]; then
-            echo "Tile ${{ matrix.tile.id }} stopped at time budget; keeping partial results."
-          elif [ "$status" -ne 0 ]; then
-            echo "Scraper exited with status $status" >&2
-            exit "$status"
-          fi
+          set -euo pipefail
+          echo "Scraping District 1 tile ${{ matrix.tile.id }} bbox=${TILE_BBOX}"
+          ./gmscraper \
+            --grid-bbox "${TILE_BBOX}" \
+            --grid-cell "${GRID_CELL}" \
+            --depth "${DEPTH}" \
+            --zoom "${ZOOM}" \
+            --email \
+            --extra-reviews \
+            --exit-on-inactivity 5m \
+            --results "../${OUT}"
           # Guarantee the artifact exists even if the tile had zero results.
           touch "../${OUT}"
-          echo "Rows in ${OUT}: $(( $(wc -l < "../${OUT}") ))"
 
       - name: Upload tile result
-        # Always upload — even if the scrape step failed or was force-stopped,
-        # whatever was flushed to disk is captured.
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tile-${{ matrix.tile.id }}
-          path: tehran-${{ matrix.tile.id }}.csv
+          path: tehran-d1-${{ matrix.tile.id }}.csv
           retention-days: 7
           if-no-files-found: warn
 
@@ -164,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           stamp="$(date +%Y%m%d-%H%M%S)"
-          out="tehran-places-${stamp}.csv"
+          out="tehran-district1-places-${stamp}.csv"
           shopt -s nullglob
           files=(tiles/*.csv)
           if [ ${#files[@]} -eq 0 ]; then
@@ -190,9 +166,9 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: tehran-scrape-${{ github.run_id }}-${{ github.run_number }}
-          name: "Tehran scrape ${{ github.run_id }} #${{ github.run_number }}"
+          tag_name: tehran-d1-scrape-${{ github.run_id }}-${{ github.run_number }}
+          name: "Tehran District 1 scrape ${{ github.run_id }} #${{ github.run_number }}"
           body: |
-            Automated batched scrape of Google Maps places for Tehran.
+            Automated batched scrape of Google Maps places for Tehran District 1.
             bbox=${{ github.event.inputs.bbox }} tile_deg=${{ github.event.inputs.tile_deg }}
           files: ${{ steps.merge.outputs.out_name }}
